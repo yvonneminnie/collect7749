@@ -1,1 +1,567 @@
-juliaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Music, Plus, Trash2, Play, Image as ImageIcon, 
+  ListMusic, Loader2, ExternalLink, X, LogIn, LogOut, Upload
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc 
+} from 'firebase/firestore';
+
+// --- Firebase Initialization (使用你提供的專屬設定) ---
+const firebaseConfig = {
+  apiKey: "AIzaSyCBcLJfjuMF7M_mz4enGJ7ZntIz5AHSq_E",
+  authDomain: "collect7749.firebaseapp.com",
+  projectId: "collect7749",
+  storageBucket: "collect7749.firebasestorage.app",
+  messagingSenderId: "591388705465",
+  appId: "1:591388705465:web:76f30866e4b79509c4d168",
+  measurementId: "G-G8X7JRFBKL"
+};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  
+  // Data States
+  const [playlists, setPlaylists] = useState([]);
+  const [songs, setSongs] = useState([]);
+  const [activePlaylistId, setActivePlaylistId] = useState(null);
+  
+  // UI States
+  const [isAddingPlaylist, setIsAddingPlaylist] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [isAddingSong, setIsAddingSong] = useState(false);
+  const [newSong, setNewSong] = useState({ url: '', title: '', coverUrl: '' });
+  const [loading, setLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  // --- 1. Auth Setup (Google Login) ---
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    setAuthError('');
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Login error:", error);
+      setAuthError('登入失敗，請確認 Firebase Console 已啟用 Google 登入。');
+    }
+  };
+
+  const handleLogout = () => {
+    signOut(auth);
+    setPlaylists([]);
+    setSongs([]);
+    setActivePlaylistId(null);
+  };
+
+  // --- 2. Data Fetching ---
+  useEffect(() => {
+    if (!user) return;
+
+    setLoading(true);
+    // 更新路徑：對應你在自己 Firebase 裡的 users/{uid} 集合
+    const playlistsRef = collection(db, 'users', user.uid, 'playlists');
+    const songsRef = collection(db, 'users', user.uid, 'songs');
+
+    const unsubPlaylists = onSnapshot(playlistsRef, (snapshot) => {
+      const pData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // Sort by creation time in memory
+      pData.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      setPlaylists(pData);
+      
+      if (pData.length > 0 && !activePlaylistId) {
+        setActivePlaylistId(pData[0].id);
+      }
+      setLoading(false);
+    }, (error) => console.error("Playlists fetch error:", error));
+
+    const unsubSongs = onSnapshot(songsRef, (snapshot) => {
+      const sData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      sData.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      setSongs(sData);
+    }, (error) => console.error("Songs fetch error:", error));
+
+    return () => {
+      unsubPlaylists();
+      unsubSongs();
+    };
+  }, [user, activePlaylistId]);
+
+  // --- Derived State ---
+  const activeSongs = useMemo(() => {
+    return songs.filter(song => song.playlistId === activePlaylistId);
+  }, [songs, activePlaylistId]);
+
+  const activePlaylistName = useMemo(() => {
+    const pl = playlists.find(p => p.id === activePlaylistId);
+    return pl ? pl.name : '我的收藏';
+  }, [playlists, activePlaylistId]);
+
+  // --- Handlers ---
+  const handleAddPlaylist = async (e) => {
+    e.preventDefault();
+    if (!newPlaylistName.trim() || !user) return;
+    
+    try {
+      const playlistsRef = collection(db, 'users', user.uid, 'playlists');
+      const docRef = await addDoc(playlistsRef, {
+        name: newPlaylistName.trim(),
+        createdAt: Date.now()
+      });
+      setActivePlaylistId(docRef.id);
+      setNewPlaylistName('');
+      setIsAddingPlaylist(false);
+    } catch (err) {
+      console.error("Error adding playlist:", err);
+    }
+  };
+
+  const handleDeletePlaylist = async (id, e) => {
+    e.stopPropagation();
+    if (!user) return;
+    
+    // In a real app, we might want a confirmation dialog. 
+    // For prototype, we delete directly.
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'playlists', id));
+      if (activePlaylistId === id) {
+        setActivePlaylistId(playlists.length > 1 ? playlists.find(p => p.id !== id)?.id : null);
+      }
+      
+      // Memory cleanup: also delete songs in this playlist
+      const songsToDelete = songs.filter(s => s.playlistId === id);
+      for (const song of songsToDelete) {
+        await deleteDoc(doc(db, 'users', user.uid, 'songs', song.id));
+      }
+    } catch (err) {
+      console.error("Error deleting playlist:", err);
+    }
+  };
+
+  const handleUrlChange = (e) => {
+    const val = e.target.value;
+    const update = { url: val, coverUrl: newSong.coverUrl, title: newSong.title };
+
+    // --- Semi-Auto Fetch Logic (YouTube) ---
+    const ytRegex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i;
+    const match = val.match(ytRegex);
+    if (match && match[1]) {
+      update.coverUrl = `https://img.youtube.com/vi/${match[1]}/hqdefault.jpg`;
+      if (!update.title) {
+        update.title = "YouTube 音樂"; // Provide a placeholder title
+      }
+    }
+
+    setNewSong(update);
+  };
+
+  const handleAddSong = async (e) => {
+    e.preventDefault();
+    if (!newSong.url.trim() || !newSong.title.trim() || !activePlaylistId || !user) return;
+
+    try {
+      const songsRef = collection(db, 'users', user.uid, 'songs');
+      await addDoc(songsRef, {
+        playlistId: activePlaylistId,
+        url: newSong.url.trim(),
+        title: newSong.title.trim(),
+        coverUrl: newSong.coverUrl.trim() || 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=500&q=80', // default cover
+        createdAt: Date.now()
+      });
+      setNewSong({ url: '', title: '', coverUrl: '' });
+      setIsAddingSong(false);
+    } catch (err) {
+      console.error("Error adding song:", err);
+    }
+  };
+
+  const handleDeleteSong = async (id) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'songs', id));
+    } catch (err) {
+      console.error("Error deleting song:", err);
+    }
+  };
+
+  // --- Renderers ---
+  if (authLoading) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-gray-50 text-gray-500">
+        <Loader2 className="h-8 w-8 animate-spin" />
+        <span className="ml-3 font-medium">載入中...</span>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-gray-100 font-sans">
+        <div className="bg-white p-10 rounded-2xl shadow-xl max-w-md w-full text-center">
+          <div className="bg-indigo-500 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg">
+            <Music size={32} className="text-white" />
+          </div>
+          <h1 className="text-2xl font-bold text-gray-800 mb-2">音樂收藏程式</h1>
+          <p className="text-gray-500 mb-8">請登入您的帳號以管理專屬的音樂清單</p>
+          
+          {authError && (
+            <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg">
+              {authError}
+            </div>
+          )}
+
+          <button 
+            onClick={handleGoogleLogin}
+            className="w-full flex items-center justify-center bg-indigo-600 text-white py-3 px-4 rounded-xl font-medium hover:bg-indigo-700 transition-colors shadow-md"
+          >
+            <LogIn size={20} className="mr-2" />
+            使用 Google 帳號登入
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-screen w-full bg-gray-100 font-sans">
+      
+      {/* Sidebar - Playlists */}
+      <div className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-xl z-10 flex-shrink-0">
+        <div className="p-6 pb-2 flex items-center space-x-3 text-white">
+          <div className="bg-indigo-500 p-2 rounded-lg">
+            <Music size={24} />
+          </div>
+          <h1 className="text-xl font-bold tracking-wider">MusicBox</h1>
+        </div>
+        
+        <div className="p-4 flex-1 overflow-y-auto mt-4">
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 px-2 flex justify-between items-center">
+            <span>我的清單</span>
+          </div>
+
+          <div className="space-y-1">
+            {playlists.map(pl => (
+              <button
+                key={pl.id}
+                onClick={() => setActivePlaylistId(pl.id)}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-colors group ${
+                  activePlaylistId === pl.id 
+                    ? 'bg-indigo-600/20 text-indigo-400 font-medium' 
+                    : 'hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center truncate">
+                  <ListMusic size={16} className="mr-3 opacity-70" />
+                  <span className="truncate">{pl.name}</span>
+                </div>
+                <div 
+                  onClick={(e) => handleDeletePlaylist(pl.id, e)}
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 hover:bg-slate-700 rounded transition-all"
+                >
+                  <Trash2 size={14} />
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Add Playlist Inline Form */}
+          {isAddingPlaylist ? (
+            <form onSubmit={handleAddPlaylist} className="mt-4 px-2">
+              <input
+                autoFocus
+                type="text"
+                value={newPlaylistName}
+                onChange={(e) => setNewPlaylistName(e.target.value)}
+                placeholder="清單名稱..."
+                className="w-full bg-slate-800 text-white text-sm rounded border border-slate-700 p-2 focus:outline-none focus:border-indigo-500"
+              />
+              <div className="flex space-x-2 mt-2">
+                <button type="submit" className="text-xs bg-indigo-500 text-white px-3 py-1 rounded hover:bg-indigo-600 transition">
+                  建立
+                </button>
+                <button 
+                  type="button" 
+                  onClick={() => setIsAddingPlaylist(false)}
+                  className="text-xs text-slate-400 hover:text-white px-2"
+                >
+                  取消
+                </button>
+              </div>
+            </form>
+          ) : (
+          <button 
+            onClick={() => setIsAddingPlaylist(true)}
+            className="mt-4 flex items-center text-sm text-slate-400 hover:text-white transition-colors px-3 py-2 w-full"
+          >
+            <Plus size={16} className="mr-2" />
+            新增播放清單
+          </button>
+        )}
+      </div>
+      
+      {/* User Status Area */}
+      <div className="p-4 border-t border-slate-800 text-xs text-slate-500 flex flex-col space-y-3">
+        <div className="flex items-center justify-between text-slate-300">
+          <div className="flex items-center truncate">
+            <img src={user.photoURL || 'https://via.placeholder.com/32'} alt="avatar" className="w-6 h-6 rounded-full mr-2" />
+            <span className="truncate w-32">{user.displayName || user.email}</span>
+          </div>
+        </div>
+        <button 
+          onClick={handleLogout}
+          className="flex items-center justify-center w-full bg-slate-800 hover:bg-slate-700 text-slate-300 py-1.5 rounded transition-colors"
+        >
+          <LogOut size={14} className="mr-1.5" />
+          登出
+        </button>
+      </div>
+    </div>
+
+    {/* Main Content Area */}
+      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-white">
+        
+        {/* Header */}
+        <header className="px-8 py-6 border-b border-gray-100 flex justify-between items-end">
+          <div>
+            <h2 className="text-3xl font-extrabold text-gray-800 tracking-tight">
+              {playlists.length === 0 ? '歡迎使用' : activePlaylistName}
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              共 {activeSongs.length} 首音樂收藏
+            </p>
+          </div>
+          
+          {playlists.length > 0 && (
+            <button
+              onClick={() => setIsAddingSong(true)}
+              className="flex items-center bg-indigo-600 text-white px-5 py-2.5 rounded-full font-medium hover:bg-indigo-700 transition-colors shadow-sm hover:shadow-md"
+            >
+              <Plus size={18} className="mr-2" />
+              加入音樂
+            </button>
+          )}
+        </header>
+
+        {/* Content (Grid) */}
+        <div className="flex-1 overflow-y-auto p-8 bg-gray-50/50">
+          
+          {playlists.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-400">
+              <ListMusic size={64} className="mb-4 text-gray-300" />
+              <p className="text-lg font-medium text-gray-500">還沒有任何播放清單</p>
+              <p className="text-sm mt-2">請先從左側建立一個清單開始收藏！</p>
+            </div>
+          ) : activeSongs.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-400">
+              <Music size={64} className="mb-4 text-gray-300" />
+              <p className="text-lg font-medium text-gray-500">這個清單還是空的</p>
+              <p className="text-sm mt-2">點擊右上角的「加入音樂」按鈕吧！</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+              {activeSongs.map(song => (
+                <div key={song.id} className="group relative bg-white rounded-xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 border border-gray-100">
+                  {/* Image Container */}
+                  <div className="aspect-square relative overflow-hidden bg-gray-100">
+                    <img 
+                      src={song.coverUrl} 
+                      alt={song.title} 
+                      className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                      onError={(e) => {
+                        e.target.onerror = null;
+                        e.target.src = 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=500&q=80';
+                      }}
+                    />
+                    
+                    {/* Hover Overlay */}
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">
+                      <a 
+                        href={song.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="bg-indigo-500 text-white p-3 rounded-full hover:bg-indigo-400 transition-transform hover:scale-110 shadow-lg"
+                      >
+                        <Play fill="currentColor" size={24} className="ml-1" />
+                      </a>
+                    </div>
+                  </div>
+                  
+                  {/* Card Info */}
+                  <div className="p-4">
+                    <h3 className="font-semibold text-gray-800 truncate" title={song.title}>
+                      {song.title}
+                    </h3>
+                    <div className="flex justify-between items-center mt-3">
+                      <a 
+                        href={song.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-xs text-indigo-500 hover:text-indigo-600 flex items-center"
+                      >
+                        <ExternalLink size={12} className="mr-1" />
+                        開啟連結
+                      </a>
+                      <button 
+                        onClick={() => handleDeleteSong(song.id)}
+                        className="text-gray-400 hover:text-red-500 p-1.5 rounded-full hover:bg-red-50 transition-colors"
+                        title="刪除"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Add Song Modal */}
+      {isAddingSong && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
+              <h3 className="text-lg font-bold text-gray-800">新增音樂收藏</h3>
+              <button 
+                onClick={() => setIsAddingSong(false)}
+                className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 p-1 rounded-full transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <form onSubmit={handleAddSong} className="p-6 space-y-5">
+              
+              {/* URL Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  音樂網址 (必填)
+                </label>
+                <input
+                  autoFocus
+                  type="url"
+                  required
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  value={newSong.url}
+                  onChange={handleUrlChange}
+                  className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1.5">
+                  ✨ 提示：貼上 YouTube 網址會自動抓取封面圖片喔！
+                </p>
+              </div>
+
+              {/* Title Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  歌曲名稱 (必填)
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="例如：周杰倫 - 晴天"
+                  value={newSong.title}
+                  onChange={(e) => setNewSong({...newSong, title: e.target.value})}
+                  className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
+                />
+              </div>
+
+              {/* Cover URL Input */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
+              <ImageIcon size={14} className="mr-1" />
+              封面圖片網址 (或上傳圖片)
+            </label>
+            <div className="space-y-2">
+              <input
+                type="url"
+                placeholder="圖片 URL..."
+                value={newSong.coverUrl}
+                onChange={(e) => setNewSong({...newSong, coverUrl: e.target.value})}
+                className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
+              />
+              <div className="relative">
+                <input
+                  type="file"
+                  accept="image/*"
+                  id="file-upload"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onloadend = () => {
+                        setNewSong({...newSong, coverUrl: reader.result});
+                      };
+                      reader.readAsDataURL(file); // 轉換為 Base64 字串
+                    }
+                  }}
+                />
+                <label 
+                  htmlFor="file-upload"
+                  className="flex items-center justify-center w-full border border-dashed border-gray-400 text-gray-600 rounded-lg px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm transition-colors"
+                >
+                  <Upload size={16} className="mr-2" />
+                  上傳本機圖片 (轉為 Base64)
+                </label>
+              </div>
+            </div>
+          </div>
+
+          {/* Preview Image */}
+              {newSong.coverUrl && (
+                <div className="mt-4 relative rounded-lg overflow-hidden border border-gray-200 aspect-video bg-gray-50 flex items-center justify-center">
+                  <img 
+                    src={newSong.coverUrl} 
+                    alt="Cover Preview" 
+                    className="object-cover w-full h-full"
+                    onError={(e) => {
+                      e.target.style.display = 'none';
+                      e.target.parentElement.innerHTML = '<span class="text-sm text-gray-400">無法預覽圖片</span>';
+                    }}
+                  />
+                  <div className="absolute top-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded backdrop-blur-md">
+                    封面預覽
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="pt-4 flex space-x-3">
+                <button
+                  type="button"
+                  onClick={() => setIsAddingSong(false)}
+                  className="flex-1 bg-white border border-gray-300 text-gray-700 py-2.5 rounded-lg font-medium hover:bg-gray-50 transition-colors text-sm"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 bg-indigo-600 text-white py-2.5 rounded-lg font-medium hover:bg-indigo-700 transition-colors text-sm shadow-sm"
+                >
+                  儲存音樂
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
